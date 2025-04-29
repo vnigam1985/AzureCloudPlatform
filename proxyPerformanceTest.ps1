@@ -26,10 +26,10 @@ for ($i = 1; $i -le $iterations; $i++) {
         $latencyMs = ($endTime - $startTime).TotalMilliseconds
         $latencyList += $latencyMs
 
-        Write-Host "Test $i: Success - Latency = $([math]::Round($latencyMs, 2)) ms" -ForegroundColor Green
+        Write-Host "Test $i Success - Latency = $([math]::Round($latencyMs, 2)) ms" -ForegroundColor Green
     } catch {
         $latencyList += 0
-        Write-Host "Test $i: Failed - Unable to download file" -ForegroundColor Red
+        Write-Host "Test $i Failed - Unable to download file" -ForegroundColor Red
     }
     
     # Optional: Wait 1 second between tests
