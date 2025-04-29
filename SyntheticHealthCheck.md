@@ -12,26 +12,32 @@ sudo bash InstallAzureMonitorAgentLinux.sh
 ```bash
 #!/bin/bash
 
-# Proxy address or FQDN
-PROXY_ADDRESS="your.proxy.address"
-
-# Log file location
+# === CONFIGURATION ===
+PROXY_ADDRESS="http://your.proxy.ip:port"   # Use http:// even for HTTPS traffic
+TARGET_URL="https://www.google.com"
 LOG_FILE="/var/log/proxy_health.log"
 
-# Current timestamp
+# === TIMESTAMP ===
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Perform health check
-ping -c 4 $PROXY_ADDRESS > /dev/null
+# === Run HTTP request via proxy ===
+CURL_OUTPUT=$(curl -x $PROXY_ADDRESS -o /dev/null -s -w "%{http_code} %{time_total}" --max-time 10 $TARGET_URL)
+CURL_EXIT=$?
 
-if [ $? -eq 0 ]; then
+# === Parse result ===
+HTTP_STATUS=$(echo $CURL_OUTPUT | awk '{print $1}')
+RESPONSE_TIME=$(echo $CURL_OUTPUT | awk '{print $2}')
+
+# === Determine final status ===
+if [[ $CURL_EXIT -eq 0 && $HTTP_STATUS -eq 200 ]]; then
     STATUS="UP"
 else
     STATUS="DOWN"
 fi
 
-# Write result into log file
-echo "{\"timestamp\":\"$TIMESTAMP\", \"proxy_status\":\"$STATUS\"}" >> $LOG_FILE
+# === Log JSON entry ===
+echo "{\"timestamp\":\"$TIMESTAMP\", \"proxy_status\":\"$STATUS\", \"http_status\":\"$HTTP_STATUS\", \"response_time_ms\":$(echo "$RESPONSE_TIME*1000" | bc)}" >> $LOG_FILE
+
 ```
 - Make the script executable: 
 ```bash
