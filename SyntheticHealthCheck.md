@@ -55,6 +55,58 @@ crontab -e
 ```bash
 */5 * * * * /opt/monitoring/proxy_health_check.sh
 ```
+- Alternatively we could use below script in Windows
+```ps1
+# === CONFIGURATION ===
+$proxyAddress = "http://your.proxy.ip:port"
+$targetUrl = "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"  # small test file
+$tempFile = "$env:TEMP\proxy_test_download.tmp"
+$logFile = "C:\Monitoring\proxy_health_log.json"
+
+# === TIMESTAMP ===
+$timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+# === SETUP PROXY ===
+$webClient = New-Object System.Net.WebClient
+$webClient.Proxy = New-Object System.Net.WebProxy($proxyAddress)
+
+# === MEASURE LATENCY ===
+try {
+    $startTime = Get-Date
+    $webClient.DownloadFile($targetUrl, $tempFile)
+    $endTime = Get-Date
+    $latencyMs = ($endTime - $startTime).TotalMilliseconds
+    $status = "UP"
+    $httpStatus = 200
+} catch {
+    $latencyMs = 0
+    $status = "DOWN"
+    $httpStatus = 0
+}
+
+# === CLEANUP TEMP FILE ===
+if (Test-Path $tempFile) {
+    Remove-Item $tempFile -Force
+}
+
+# === LOG JSON ENTRY ===
+$logEntry = @{
+    timestamp       = $timestamp
+    proxy_status    = $status
+    http_status     = $httpStatus
+    response_time_ms = [math]::Round($latencyMs, 2)
+} | ConvertTo-Json -Compress
+
+# Ensure directory exists
+if (!(Test-Path "C:\Monitoring")) {
+    New-Item -ItemType Directory -Path "C:\Monitoring" | Out-Null
+}
+
+# Write log entry
+Add-Content -Path $logFile -Value $logEntry
+
+```
+
 ✅ Now the health check will run every 5 minutes and write to /var/log/proxy_health.log.
 
 - **Set Up Data Collection Rule (DCR) in Azure**
