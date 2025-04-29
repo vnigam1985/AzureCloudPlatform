@@ -109,6 +109,42 @@ crontab -e
 
     - Give it a name like proxy-health-dcr
 
+- Or use below YAML to create DCR
+
+```yaml
+location: your-region
+properties:
+  dataSources:
+    customLogs:
+    - streams:
+      - Custom-ProxyHealth
+      filePatterns:
+      - /var/log/proxy_health.log
+      name: ProxyHealthLogs
+  destinations:
+    logAnalytics:
+    - workspaceResourceId: /subscriptions/your-subscription-id/resourceGroups/your-rg-name/providers/Microsoft.OperationalInsights/workspaces/your-laworkspace
+      name: LAWorkspaceDestination
+  dataFlows:
+  - streams:
+    - Custom-ProxyHealth
+    destinations:
+    - LAWorkspaceDestination
+```
+
+- Replace:
+    -your-region
+    - your-subscription-id
+    - your-rg-name
+    - your-laworkspace
+with your real values.
+
+- Create the DCR using Azure CLI:
+
+```bash
+az monitor data-collection rule create --resource-group your-rg-name --name proxy-health-dcr --location your-region --rule proxy-health-dcr.yaml
+```
+
 - **Verify Log Collection**
 
     -  Go to Log Analytics Workspace → Logs.
