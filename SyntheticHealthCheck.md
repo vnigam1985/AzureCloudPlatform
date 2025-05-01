@@ -16,27 +16,44 @@ sudo bash InstallAzureMonitorAgentLinux.sh
 PROXY_ADDRESS="http://your.proxy.ip:port"   # Use http:// even for HTTPS traffic
 TARGET_URL="https://www.google.com"
 LOG_FILE="/var/log/proxy_health.log"
+TOTAL_REQUESTS=20
 
 # === TIMESTAMP ===
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# === Run HTTP request via proxy ===
-CURL_OUTPUT=$(curl -x $PROXY_ADDRESS -o /dev/null -s -w "%{http_code} %{time_total}" --max-time 10 $TARGET_URL)
-CURL_EXIT=$?
+# === INIT METRICS ===
+TOTAL_TIME=0
+SUCCESS_COUNT=0
+LAST_HTTP_STATUS=0
 
-# === Parse result ===
-HTTP_STATUS=$(echo $CURL_OUTPUT | awk '{print $1}')
-RESPONSE_TIME=$(echo $CURL_OUTPUT | awk '{print $2}')
+# === Run 20 HTTP requests via proxy ===
+for i in $(seq 1 $TOTAL_REQUESTS); do
+    CURL_OUTPUT=$(curl -x $PROXY_ADDRESS -o /dev/null -s -w "%{http_code} %{time_total}" --max-time 10 $TARGET_URL)
+    CURL_EXIT=$?
+    
+    HTTP_STATUS=$(echo $CURL_OUTPUT | awk '{print $1}')
+    RESPONSE_TIME=$(echo $CURL_OUTPUT | awk '{print $2}')
+    
+    # Convert response time to milliseconds and add to total
+    if [[ $CURL_EXIT -eq 0 && $HTTP_STATUS -eq 200 ]]; then
+        SUCCESS_COUNT=$((SUCCESS_COUNT+1))
+        TOTAL_TIME=$(echo "$TOTAL_TIME + $RESPONSE_TIME" | bc)
+    fi
 
-# === Determine final status ===
-if [[ $CURL_EXIT -eq 0 && $HTTP_STATUS -eq 200 ]]; then
+    LAST_HTTP_STATUS=$HTTP_STATUS  # Save last for logging
+done
+
+# === Calculate average response time ===
+if [[ $SUCCESS_COUNT -gt 0 ]]; then
+    AVG_RESPONSE_TIME=$(echo "scale=3; $TOTAL_TIME / $SUCCESS_COUNT * 1000" | bc)  # in ms
     STATUS="UP"
 else
+    AVG_RESPONSE_TIME=0
     STATUS="DOWN"
 fi
 
 # === Log JSON entry ===
-echo "{\"timestamp\":\"$TIMESTAMP\", \"proxy_status\":\"$STATUS\", \"http_status\":\"$HTTP_STATUS\", \"response_time_ms\":$(echo "$RESPONSE_TIME*1000" | bc)}" >> $LOG_FILE
+echo "{\"timestamp\":\"$TIMESTAMP\", \"proxy_status\":\"$STATUS\", \"http_status\":\"$LAST_HTTP_STATUS\", \"avg_response_time_ms\":$AVG_RESPONSE_TIME}" >> $LOG_FILE
 
 ```
 - Make the script executable: 
