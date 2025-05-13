@@ -45,29 +45,30 @@ if ($SUCCESS_COUNT -gt 0) {
     $STATUS = "DOWN"
 }
 
-# === Prepare new log entry ===
-$newEntry = [PSCustomObject]@{
+# === Create compact JSON object ===
+$newEntry = @{
     TimeGenerated   = $TIMESTAMP
     ProxyStatus     = $STATUS
     HttpStatus      = $LAST_HTTP_STATUS
     ResponseTime_ms = $AVG_RESPONSE_TIME
 }
 
-# === Read existing log file or initialize ===
-if (-Not (Test-Path $LOG_FILE)) {
+# === Read existing log or initialize ===
+if (-not (Test-Path $LOG_FILE)) {
     $logArray = @()
 } else {
     try {
         $logContent = Get-Content $LOG_FILE -Raw
         $logArray = $logContent | ConvertFrom-Json
         if ($logArray -isnot [System.Collections.IEnumerable]) {
-            $logArray = @($logArray)  # Wrap single object in array
+            $logArray = @($logArray)
         }
     } catch {
         $logArray = @()
     }
 }
 
-# === Append and write back ===
+# === Append and write compact JSON ===
 $logArray = @($logArray) + $newEntry
-$logArray | ConvertTo-Json -Depth 3 | Set-Content $LOG_FILE
+# Write compact one-line JSON array to file
+$logArray | ConvertTo-Json -Depth 3 -Compress | Set-Content -Encoding UTF8 -Path $LOG_FILE

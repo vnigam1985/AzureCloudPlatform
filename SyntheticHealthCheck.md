@@ -15,7 +15,7 @@ sudo bash InstallAzureMonitorAgentLinux.sh
 # === CONFIGURATION ===
 PROXY_ADDRESS="http://your.proxy.ip:port"   # Use http:// even for HTTPS traffic
 TARGET_URL="https://www.google.com"
-LOG_FILE="/var/log/proxy_health.log"
+LOG_FILE="/var/log/proxy_health.json"
 TOTAL_REQUESTS=20
 
 # === TIMESTAMP ===
@@ -30,17 +30,16 @@ LAST_HTTP_STATUS=0
 for i in $(seq 1 $TOTAL_REQUESTS); do
     CURL_OUTPUT=$(curl -x $PROXY_ADDRESS -o /dev/null -s -w "%{http_code} %{time_total}" --max-time 10 $TARGET_URL)
     CURL_EXIT=$?
-    
+
     HTTP_STATUS=$(echo $CURL_OUTPUT | awk '{print $1}')
     RESPONSE_TIME=$(echo $CURL_OUTPUT | awk '{print $2}')
-    
-    # Convert response time to milliseconds and add to total
+
     if [[ $CURL_EXIT -eq 0 && $HTTP_STATUS -eq 200 ]]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT+1))
         TOTAL_TIME=$(echo "$TOTAL_TIME + $RESPONSE_TIME" | bc)
     fi
 
-    LAST_HTTP_STATUS=$HTTP_STATUS  # Save last for logging
+    LAST_HTTP_STATUS=$HTTP_STATUS
 done
 
 # === Calculate average response time ===
@@ -52,8 +51,24 @@ else
     STATUS="DOWN"
 fi
 
-# === Log JSON entry ===
-echo "{\"TimeGenerated\":\"$TIMESTAMP\", \"ProxyStatus\":\"$STATUS\", \"HttpStatus\":\"$LAST_HTTP_STATUS\", \"ResponseTime_ms\":$AVG_RESPONSE_TIME}" >> $LOG_FILE
+# === Prepare compact JSON Entry ===
+NEW_ENTRY=$(jq -nc --arg time "$TIMESTAMP" \
+                   --arg status "$STATUS" \
+                   --argjson http "$LAST_HTTP_STATUS" \
+                   --argjson rtime "$AVG_RESPONSE_TIME" \
+                   '{TimeGenerated: $time, ProxyStatus: $status, HttpStatus: $http, ResponseTime_ms: $rtime}')
+
+# === Append to JSON Array Log ===
+
+# If file doesn't exist, create with empty array
+if [ ! -f "$LOG_FILE" ]; then
+    echo "[]" > "$LOG_FILE"
+fi
+
+# Append compact entry to compact array
+TMP_FILE=$(mktemp)
+jq -c ". += [$NEW_ENTRY]" "$LOG_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$LOG_FILE"
+
 
 ```
 - Make the script executable: 
