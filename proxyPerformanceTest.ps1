@@ -1,54 +1,57 @@
 # === CONFIGURATION ===
-$proxyAddress = "http://your.proxy.ip:port"
-$targetUrl = "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"  # small test file
-$tempFile = "$env:TEMP\proxy_test_download.tmp"
-$iterations = 10
+$PROXY_ADDRESS = "http://your.proxy.ip:port"   # Use http:// even for HTTPS traffic
+$TARGET_URL = "https://www.google.com"
+$LOG_FILE = "C:\proxy_health.log"
+$TOTAL_REQUESTS = 20
 
-# === SETUP PROXY ===
-$webClient = New-Object System.Net.WebClient
-$webClient.Proxy = New-Object System.Net.WebProxy($proxyAddress)
+# === TIMESTAMP ===
+$TIMESTAMP = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
 # === INIT METRICS ===
-$latencyList = @()
+$TOTAL_TIME = 0.0
+$SUCCESS_COUNT = 0
+$LAST_HTTP_STATUS = 0
 
-Write-Host "Starting Proxy Performance Test..." -ForegroundColor Cyan
-Write-Host "Proxy: $proxyAddress" 
-Write-Host "Target: $targetUrl"
-Write-Host "Iterations: $iterations"
-Write-Host "-------------------------------------------"
-
-# === START TEST ===
-for ($i = 1; $i -le $iterations; $i++) {
+# === Run 20 HTTP requests via proxy ===
+for ($i = 1; $i -le $TOTAL_REQUESTS; $i++) {
     try {
         $startTime = Get-Date
-        $webClient.DownloadFile($targetUrl, $tempFile)
+        $response = Invoke-WebRequest -Uri $TARGET_URL -Proxy $PROXY_ADDRESS -TimeoutSec 10 -UseBasicParsing
         $endTime = Get-Date
-        $latencyMs = ($endTime - $startTime).TotalMilliseconds
-        $latencyList += $latencyMs
+        $elapsedTime = ($endTime - $startTime).TotalSeconds
 
-        Write-Host "Test $i Success - Latency = $([math]::Round($latencyMs, 2)) ms" -ForegroundColor Green
-    } catch {
-        $latencyList += 0
-        Write-Host "Test $i Failed - Unable to download file" -ForegroundColor Red
+        if ($response.StatusCode -eq 200) {
+            $SUCCESS_COUNT++
+            $TOTAL_TIME += $elapsedTime
+        }
+
+        $LAST_HTTP_STATUS = $response.StatusCode
     }
-    
-    # Optional: Wait 1 second between tests
-    Start-Sleep -Seconds 1
+    catch {
+        if ($_.Exception.Response -ne $null) {
+            $LAST_HTTP_STATUS = $_.Exception.Response.StatusCode.value__
+        }
+        else {
+            $LAST_HTTP_STATUS = 0
+        }
+    }
 }
 
-# === CLEANUP ===
-if (Test-Path $tempFile) {
-    Remove-Item $tempFile -Force
-}
-
-# === CALCULATE AVERAGE ===
-$successfulLatencies = $latencyList | Where-Object { $_ -gt 0 }
-if ($successfulLatencies.Count -gt 0) {
-    $averageLatency = ($successfulLatencies | Measure-Object -Average).Average
-    Write-Host "-------------------------------------------"
-    Write-Host "Average Latency (across $($successfulLatencies.Count) successful downloads): $([math]::Round($averageLatency, 2)) ms" -ForegroundColor Yellow
+# === Calculate average response time ===
+if ($SUCCESS_COUNT -gt 0) {
+    $AVG_RESPONSE_TIME = [math]::Round(($TOTAL_TIME / $SUCCESS_COUNT) * 1000, 3)  # Convert to ms
+    $STATUS = "UP"
 } else {
-    Write-Host "No successful downloads. Proxy might be unreachable." -ForegroundColor Red
+    $AVG_RESPONSE_TIME = 0
+    $STATUS = "DOWN"
 }
 
-Write-Host "Test Completed."
+# === Log JSON entry ===
+$logEntry = @{
+    TimeGenerated   = $TIMESTAMP
+    ProxyStatus     = $STATUS
+    HttpStatus      = $LAST_HTTP_STATUS
+    ResponseTime_ms = $AVG_RESPONSE_TIME
+} | ConvertTo-Json -Compress
+
+Add-Content -Path $LOG_FILE -Value $logEntry

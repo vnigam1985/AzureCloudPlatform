@@ -53,7 +53,7 @@ else
 fi
 
 # === Log JSON entry ===
-echo "{\"timestamp\":\"$TIMESTAMP\", \"proxy_status\":\"$STATUS\", \"http_status\":\"$LAST_HTTP_STATUS\", \"avg_response_time_ms\":$AVG_RESPONSE_TIME}" >> $LOG_FILE
+echo "{\"TimeGenerated\":\"$TIMESTAMP\", \"ProxyStatus\":\"$STATUS\", \"HttpStatus\":\"$LAST_HTTP_STATUS\", \"ResponseTime_ms\":$AVG_RESPONSE_TIME}" >> $LOG_FILE
 
 ```
 - Make the script executable: 
