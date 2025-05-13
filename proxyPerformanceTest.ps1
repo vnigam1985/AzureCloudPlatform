@@ -46,7 +46,7 @@ if ($SUCCESS_COUNT -gt 0) {
 }
 
 # === Prepare new log entry ===
-$newEntry = @{
+$newEntry = [PSCustomObject]@{
     TimeGenerated   = $TIMESTAMP
     ProxyStatus     = $STATUS
     HttpStatus      = $LAST_HTTP_STATUS
@@ -58,13 +58,16 @@ if (-Not (Test-Path $LOG_FILE)) {
     $logArray = @()
 } else {
     try {
-        $logArray = Get-Content $LOG_FILE -Raw | ConvertFrom-Json
+        $logContent = Get-Content $LOG_FILE -Raw
+        $logArray = $logContent | ConvertFrom-Json
+        if ($logArray -isnot [System.Collections.IEnumerable]) {
+            $logArray = @($logArray)  # Wrap single object in array
+        }
     } catch {
-        # In case file is malformed
         $logArray = @()
     }
 }
 
 # === Append and write back ===
-$logArray += $newEntry
+$logArray = @($logArray) + $newEntry
 $logArray | ConvertTo-Json -Depth 3 | Set-Content $LOG_FILE
