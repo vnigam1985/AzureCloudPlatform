@@ -1,7 +1,7 @@
 # === CONFIGURATION ===
-$PROXY_ADDRESS = "http://your.proxy.ip:port"   # Use http:// even for HTTPS traffic
+$PROXY_ADDRESS = "http://your.proxy.ip:port"
 $TARGET_URL = "https://www.google.com"
-$LOG_FILE = "C:\proxy_health.log"
+$LOG_FILE = "C:\proxy_health.json"
 $TOTAL_REQUESTS = 20
 
 # === TIMESTAMP ===
@@ -30,8 +30,7 @@ for ($i = 1; $i -le $TOTAL_REQUESTS; $i++) {
     catch {
         if ($_.Exception.Response -ne $null) {
             $LAST_HTTP_STATUS = $_.Exception.Response.StatusCode.value__
-        }
-        else {
+        } else {
             $LAST_HTTP_STATUS = 0
         }
     }
@@ -39,19 +38,33 @@ for ($i = 1; $i -le $TOTAL_REQUESTS; $i++) {
 
 # === Calculate average response time ===
 if ($SUCCESS_COUNT -gt 0) {
-    $AVG_RESPONSE_TIME = [math]::Round(($TOTAL_TIME / $SUCCESS_COUNT) * 1000, 3)  # Convert to ms
+    $AVG_RESPONSE_TIME = [math]::Round(($TOTAL_TIME / $SUCCESS_COUNT) * 1000, 3)
     $STATUS = "UP"
 } else {
     $AVG_RESPONSE_TIME = 0
     $STATUS = "DOWN"
 }
 
-# === Log JSON entry ===
-$logEntry = @{
+# === Prepare new log entry ===
+$newEntry = @{
     TimeGenerated   = $TIMESTAMP
     ProxyStatus     = $STATUS
     HttpStatus      = $LAST_HTTP_STATUS
     ResponseTime_ms = $AVG_RESPONSE_TIME
-} | ConvertTo-Json -Compress
+}
 
-Add-Content -Path $LOG_FILE -Value $logEntry
+# === Read existing log file or initialize ===
+if (-Not (Test-Path $LOG_FILE)) {
+    $logArray = @()
+} else {
+    try {
+        $logArray = Get-Content $LOG_FILE -Raw | ConvertFrom-Json
+    } catch {
+        # In case file is malformed
+        $logArray = @()
+    }
+}
+
+# === Append and write back ===
+$logArray += $newEntry
+$logArray | ConvertTo-Json -Depth 3 | Set-Content $LOG_FILE
