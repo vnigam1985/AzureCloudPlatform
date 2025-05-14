@@ -14,11 +14,11 @@ $TotalResponseTime = 0.0
 $MinResponseTime = [Double]::MaxValue
 $MaxResponseTime = 0.0
 $TotalBytesDownloaded = 0
-$TotalSpeedKbps = 0.0
+$TotalSpeedMbps = 0.0
 
 # === OPTIONAL: CSV HEADER ===
 # if (-not (Test-Path $LOG_FILE_CSV)) {
-#     "TimeGenerated,ProxyStatus,HttpStatus,ResponseTime_ms,SizeDownloaded,DownloadSpeed_kbps" | Out-File -Encoding utf8 -FilePath $LOG_FILE_CSV
+#     "TimeGenerated,ProxyStatus,HttpStatus,ResponseTime_ms,SizeDownloaded_MB,DownloadSpeed_mbps" | Out-File -Encoding utf8 -FilePath $LOG_FILE_CSV
 # }
 
 # === TIMER SETUP ===
@@ -31,7 +31,8 @@ while ((Get-Date) -lt $endTime) {
     $RESPONSE_TIME_MS = 0
     $STATUS = "DOWN"
     $SIZE_DOWNLOADED = 0
-    $SPEED_KBPS = 0
+    $SIZE_MB = 0
+    $SPEED_MBPS = 0
 
     try {
         $startReq = Get-Date
@@ -50,8 +51,10 @@ while ((Get-Date) -lt $endTime) {
         }
 
         $SIZE_DOWNLOADED = $response.RawContentLength
+        $SIZE_MB = [math]::Round($SIZE_DOWNLOADED / 1MB, 4)
+
         if ($elapsed -gt 0) {
-            $SPEED_KBPS = [math]::Round(($SIZE_DOWNLOADED / $elapsed) / 1024, 2)
+            $SPEED_MBPS = [math]::Round((($SIZE_DOWNLOADED * 8) / $elapsed) / 1MB, 4)
         }
     }
     catch {
@@ -65,7 +68,7 @@ while ((Get-Date) -lt $endTime) {
     $TotalRuns++
     $TotalResponseTime += $RESPONSE_TIME_MS
     $TotalBytesDownloaded += $SIZE_DOWNLOADED
-    $TotalSpeedKbps += $SPEED_KBPS
+    $TotalSpeedMbps += $SPEED_MBPS
 
     if ($RESPONSE_TIME_MS -lt $MinResponseTime) { $MinResponseTime = $RESPONSE_TIME_MS }
     if ($RESPONSE_TIME_MS -gt $MaxResponseTime) { $MaxResponseTime = $RESPONSE_TIME_MS }
@@ -76,14 +79,14 @@ while ((Get-Date) -lt $endTime) {
         ProxyStatus         = $STATUS
         HttpStatus          = $LAST_HTTP_STATUS
         ResponseTime_ms     = $RESPONSE_TIME_MS
-        SizeDownloaded      = $SIZE_DOWNLOADED
-        DownloadSpeed_kbps  = $SPEED_KBPS
+        SizeDownloaded_MB   = $SIZE_MB
+        DownloadSpeed_mbps  = $SPEED_MBPS
     } | ConvertTo-Json -Compress
 
     Add-Content -Path $LOG_FILE_JSON -Value $logEntry
 
     # === CSV Log Line (Optional) ===
-    # "$TIMESTAMP,$STATUS,$LAST_HTTP_STATUS,$RESPONSE_TIME_MS,$SIZE_DOWNLOADED,$SPEED_KBPS" | Out-File -Append -Encoding utf8 -FilePath $LOG_FILE_CSV
+    # "$TIMESTAMP,$STATUS,$LAST_HTTP_STATUS,$RESPONSE_TIME_MS,$SIZE_MB,$SPEED_MBPS" | Out-File -Append -Encoding utf8 -FilePath $LOG_FILE_CSV
 
     Start-Sleep -Seconds $SLEEP_INTERVAL
 }
@@ -91,9 +94,9 @@ while ((Get-Date) -lt $endTime) {
 # === FINAL SUMMARY ===
 $AvgResponseTime = if ($TotalRuns -gt 0) { [math]::Round($TotalResponseTime / $TotalRuns, 2) } else { 0 }
 $TotalDownloadedMB = [math]::Round($TotalBytesDownloaded / 1MB, 2)
-$AvgDownloadSpeed = if ($TotalRuns -gt 0) { [math]::Round($TotalSpeedKbps / $TotalRuns, 2) } else { 0 }
+$AvgDownloadSpeedMbps = if ($TotalRuns -gt 0) { [math]::Round($TotalSpeedMbps / $TotalRuns, 2) } else { 0 }
 
 # === PRINT CSV SUMMARY TO SHELL ===
 "`nSummary:"
-"TotalRuns,UpCount,DownCount,MinResponseTime_ms,MaxResponseTime_ms,AvgResponseTime_ms,TotalDownloaded_MB,AvgDownloadSpeed_kbps"
-"$TotalRuns,$UpCount,$DownCount,$MinResponseTime,$MaxResponseTime,$AvgResponseTime,$TotalDownloadedMB,$AvgDownloadSpeed"
+"TotalRuns,UpCount,DownCount,MinResponseTime_ms,MaxResponseTime_ms,AvgResponseTime_ms,TotalDownloaded_MB,AvgDownloadSpeed_mbps"
+"$TotalRuns,$UpCount,$DownCount,$MinResponseTime,$MaxResponseTime,$AvgResponseTime,$TotalDownloadedMB,$AvgDownloadSpeedMbps"
