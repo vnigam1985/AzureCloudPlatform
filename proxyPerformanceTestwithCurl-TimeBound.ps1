@@ -29,9 +29,10 @@ while ((Get-Date) -lt $endTime) {
     $TIMESTAMP = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
     # Run curl and capture output
-    $curlCmd = "curl.exe -x `"$PROXY_ADDRESS`" -o NUL -s -w `"%%{http_code} %%{time_total} %%{size_download} %%{speed_download}`" --max-time 10 $TARGET_URL"
+    $curlCmd = "curl.exe -x `"$PROXY_ADDRESS`" -o NUL -s -w `"%{http_code} %{time_total} %{size_download} %{speed_download}`" --max-time 10 $TARGET_URL"
     $output = cmd.exe /c $curlCmd
     $parts = $output -split ' '
+
 
     if ($parts.Count -lt 4) {
         # Invalid response (e.g., timeout)
