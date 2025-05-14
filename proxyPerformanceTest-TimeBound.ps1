@@ -2,53 +2,98 @@
 $PROXY_ADDRESS = "http://your.proxy.ip:port"
 $TARGET_URL = "https://www.google.com"
 $LOG_FILE_JSON = "C:\proxy_health.log"
-$LOG_FILE_CSV  = "C:\proxy_health.csv"
+$LOG_FILE_CSV = "C:\proxy_health.csv"
 $DURATION_SECONDS = 600
 $SLEEP_INTERVAL = 1
 
-# === Timer Setup ===
+# === METRICS INITIALIZATION ===
+$TotalRuns = 0
+$UpCount = 0
+$DownCount = 0
+$TotalResponseTime = 0.0
+$MinResponseTime = [Double]::MaxValue
+$MaxResponseTime = 0.0
+$TotalBytesDownloaded = 0
+$TotalSpeedKbps = 0.0
+
+# === OPTIONAL: CSV HEADER ===
+# if (-not (Test-Path $LOG_FILE_CSV)) {
+#     "TimeGenerated,ProxyStatus,HttpStatus,ResponseTime_ms,SizeDownloaded,DownloadSpeed_kbps" | Out-File -Encoding utf8 -FilePath $LOG_FILE_CSV
+# }
+
+# === TIMER SETUP ===
 $startTime = Get-Date
 $endTime = $startTime.AddSeconds($DURATION_SECONDS)
-
-# === OPTIONAL: Write CSV Header (Uncomment below to use CSV) ===
-# if (-not (Test-Path $LOG_FILE_CSV)) {
-#     "TimeGenerated,ProxyStatus,HttpStatus,ResponseTime_ms" | Out-File -Encoding utf8 -FilePath $LOG_FILE_CSV
-# }
 
 while ((Get-Date) -lt $endTime) {
     $TIMESTAMP = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $LAST_HTTP_STATUS = 0
     $RESPONSE_TIME_MS = 0
     $STATUS = "DOWN"
+    $SIZE_DOWNLOADED = 0
+    $SPEED_KBPS = 0
 
     try {
         $startReq = Get-Date
         $response = Invoke-WebRequest -Uri $TARGET_URL -Proxy $PROXY_ADDRESS -TimeoutSec 10 -UseBasicParsing
         $endReq = Get-Date
+
         $elapsed = ($endReq - $startReq).TotalSeconds
         $RESPONSE_TIME_MS = [math]::Round($elapsed * 1000, 3)
+        $LAST_HTTP_STATUS = $response.StatusCode
+
         if ($response.StatusCode -eq 200) {
             $STATUS = "UP"
+            $UpCount++
+        } else {
+            $DownCount++
         }
-        $LAST_HTTP_STATUS = $response.StatusCode
-    } catch {
+
+        $SIZE_DOWNLOADED = $response.RawContentLength
+        if ($elapsed -gt 0) {
+            $SPEED_KBPS = [math]::Round(($SIZE_DOWNLOADED / $elapsed) / 1024, 2)
+        }
+    }
+    catch {
+        $DownCount++
         if ($_.Exception.Response -ne $null) {
             $LAST_HTTP_STATUS = $_.Exception.Response.StatusCode.value__
         }
     }
 
+    # Update metrics
+    $TotalRuns++
+    $TotalResponseTime += $RESPONSE_TIME_MS
+    $TotalBytesDownloaded += $SIZE_DOWNLOADED
+    $TotalSpeedKbps += $SPEED_KBPS
+
+    if ($RESPONSE_TIME_MS -lt $MinResponseTime) { $MinResponseTime = $RESPONSE_TIME_MS }
+    if ($RESPONSE_TIME_MS -gt $MaxResponseTime) { $MaxResponseTime = $RESPONSE_TIME_MS }
+
     # === NDJSON Log Line ===
     $logEntry = @{
-        TimeGenerated   = $TIMESTAMP
-        ProxyStatus     = $STATUS
-        HttpStatus      = $LAST_HTTP_STATUS
-        ResponseTime_ms = $RESPONSE_TIME_MS
+        TimeGenerated       = $TIMESTAMP
+        ProxyStatus         = $STATUS
+        HttpStatus          = $LAST_HTTP_STATUS
+        ResponseTime_ms     = $RESPONSE_TIME_MS
+        SizeDownloaded      = $SIZE_DOWNLOADED
+        DownloadSpeed_kbps  = $SPEED_KBPS
     } | ConvertTo-Json -Compress
 
     Add-Content -Path $LOG_FILE_JSON -Value $logEntry
 
-    # === CSV Log Line (Uncomment to use CSV instead) ===
-    # "$TIMESTAMP,$STATUS,$LAST_HTTP_STATUS,$RESPONSE_TIME_MS" | Out-File -Append -Encoding utf8 -FilePath $LOG_FILE_CSV
+    # === CSV Log Line (Optional) ===
+    # "$TIMESTAMP,$STATUS,$LAST_HTTP_STATUS,$RESPONSE_TIME_MS,$SIZE_DOWNLOADED,$SPEED_KBPS" | Out-File -Append -Encoding utf8 -FilePath $LOG_FILE_CSV
 
     Start-Sleep -Seconds $SLEEP_INTERVAL
 }
+
+# === FINAL SUMMARY ===
+$AvgResponseTime = if ($TotalRuns -gt 0) { [math]::Round($TotalResponseTime / $TotalRuns, 2) } else { 0 }
+$TotalDownloadedMB = [math]::Round($TotalBytesDownloaded / 1MB, 2)
+$AvgDownloadSpeed = if ($TotalRuns -gt 0) { [math]::Round($TotalSpeedKbps / $TotalRuns, 2) } else { 0 }
+
+# === PRINT CSV SUMMARY TO SHELL ===
+"`nSummary:"
+"TotalRuns,UpCount,DownCount,MinResponseTime_ms,MaxResponseTime_ms,AvgResponseTime_ms,TotalDownloaded_MB,AvgDownloadSpeed_kbps"
+"$TotalRuns,$UpCount,$DownCount,$MinResponseTime,$MaxResponseTime,$AvgResponseTime,$TotalDownloadedMB,$AvgDownloadSpeed"
