@@ -1,17 +1,18 @@
-import os
 import datetime
+import logging
+import os
 import json
 import requests
+import azure.functions as func
+import base64
 import hashlib
 import hmac
-import base64
-import logging
-import azure.functions as func
 
-workspace_id = os.environ['LOG_ANALYTICS_WORKSPACE_ID']
-shared_key = os.environ['LOG_ANALYTICS_SHARED_KEY']
+# Environment variables
+workspace_id = os.environ["LOG_ANALYTICS_WORKSPACE_ID"]
+shared_key = os.environ["LOG_ANALYTICS_SHARED_KEY"]
 log_type = "ProxyMonitoring"
-proxy_url = os.environ.get('PROXY_URL', None)
+proxy_url = os.environ.get("PROXY_URL", None)
 
 target_urls = [
     "https://www.google.com",
@@ -46,12 +47,15 @@ def send_log_entry(log_entry):
         'x-ms-date': rfc1123date
     }
     response = requests.post(uri, data=body, headers=headers)
-    if response.status_code >= 200 and response.status_code < 300:
-        logging.info(f"Log entry sent: {log_entry}")
+    if response.status_code < 300:
+        logging.info("Log entry sent successfully")
     else:
-        logging.error(f"Failed to send log entry: {response.status_code} {response.text}")
+        logging.error(f"Failed to send log entry: {response.status_code}, {response.text}")
 
-def main(timer: func.TimerRequest) -> None:
+@app.function_name(name="proxy_function")
+@app.schedule(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=True)
+def proxy_monitor(timer: func.TimerRequest) -> None:
+    logging.info("Proxy monitoring started")
     for url in target_urls:
         timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         executed_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -60,7 +64,7 @@ def main(timer: func.TimerRequest) -> None:
         response_time_ms = 0
 
         try:
-            proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
             start = datetime.datetime.now()
             response = requests.get(url, proxies=proxies, timeout=10)
             end = datetime.datetime.now()
@@ -68,7 +72,7 @@ def main(timer: func.TimerRequest) -> None:
             status_code = response.status_code
             status = "Success" if response.status_code == 200 else "Failure"
         except Exception as e:
-            logging.error(f"Request failed for {url}: {e}")
+            logging.error(f"Error fetching {url}: {e}")
 
         log_entry = {
             "TimeGenerated": timestamp,
@@ -78,4 +82,5 @@ def main(timer: func.TimerRequest) -> None:
             "ResponseTime_ms": response_time_ms,
             "ExecutedAt": executed_at
         }
+
         send_log_entry(log_entry)
