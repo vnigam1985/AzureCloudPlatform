@@ -1,6 +1,6 @@
 # Proxy Monitor Azure Function
 
-This project deploys a PowerShell-based Azure Function in an Azure App Service Environment (ASE) to monitor a proxy by accessing five public URLs every 10 seconds through a specified proxy URL. It logs metrics (Timestamp, Url, HttpResponseCode, ResponseTimeMs, ProxyStatus, ExecutedAt) to a custom Log Analytics workspace table using a user-assigned managed identity for authentication and the Logs Ingestion API.
+This project deploys a PowerShell-based Azure Function in an Azure App Service Environment (ASE) to monitor a proxy by accessing five public URLs every 10 seconds through a specified proxy URL, which requires CA and root CA certificates in `.pem` format for server certificate validation. It logs metrics (Timestamp, Url, HttpResponseCode, ResponseTimeMs, ProxyStatus, ExecutedAt) to a custom Log Analytics workspace table using a user-assigned managed identity for authentication and the Logs Ingestion API.
 
 ## Prerequisites
 - **Azure Subscription**: With access to an App Service Environment.
@@ -9,8 +9,12 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
 - **Azure Functions Core Tools**: Version 4.x for local development.
 - **Log Analytics Workspace**: Created in Azure.
 - **URLs to Monitor**: Five public URLs (e.g., `https://example.com`).
-- **Proxy URL**: The URL of the proxy to test (e.g., `http://<proxy-host>:<port>`).
-- **Basic Familiarity**: With Azure Functions, PowerShell, Azure Monitor, and managed identities.
+- **Proxy URL**: The URL of the proxy to test (e.g., `https://<proxy-host>:<port>`).
+- **Proxy Certificates**:
+  - CA certificate (`ca-cert.pem`): Intermediate CA certificate for the proxy’s server certificate.
+  - Root CA certificate (`rootca-cert.pem`): Root CA certificate for the proxy’s server certificate.
+- **OpenSSL** (optional): For converting `.pem` to `.cer` if needed.
+- **Basic Familiarity**: With Azure Functions, PowerShell, Azure Monitor, managed identities, and certificate management.
 
 ## Setup Instructions
 
@@ -211,7 +215,50 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
    - Save the role assignment.
    - Verify the assignment in **Access Control (IAM)** > **View access** to ensure the managed identity has the **Monitoring Metrics Publisher** role.
 
-### Step 3: Create the PowerShell Function
+### Step 3: Upload Proxy Certificates
+1. **Convert .pem to .cer (if needed)**:
+   - Azure Function Apps may require certificates in `.cer` (DER) format. If uploading `.pem` files fails, convert them to `.cer` using OpenSSL or PowerShell.
+   - **Using OpenSSL**:
+     ```bash
+     # Install OpenSSL if needed (e.g., choco install openssl on Windows)
+     openssl x509 -in ca-cert.pem -out ca-cert.cer -outform DER
+     openssl x509 -in rootca-cert.pem -out rootca-cert.cer -outform DER
+     ```
+   - **Using PowerShell**:
+     ```powershell
+     # Convert ca-cert.pem to ca-cert.cer
+     $pemContent = Get-Content -Path "ca-cert.pem" -Raw
+     $certBase64 = ($pemContent -replace "-----BEGIN CERTIFICATE-----", "" -replace "-----END CERTIFICATE-----", "" -replace "\s", "")
+     $certBytes = [System.Convert]::FromBase64String($certBase64)
+     [System.IO.File]::WriteAllBytes("ca-cert.cer", $certBytes)
+
+     # Convert rootca-cert.pem to rootca-cert.cer
+     $pemContent = Get-Content -Path "rootca-cert.pem" -Raw
+     $certBase64 = ($pemContent -replace "-----BEGIN CERTIFICATE-----", "" -replace "-----END CERTIFICATE-----", "" -replace "\s", "")
+     $certBytes = [System.Convert]::FromBase64String($certBase64)
+     [System.IO.File]::WriteAllBytes("rootca-cert.cer", $certBytes)
+     ```
+   - Use the `.cer` files for uploading if conversion is needed. If `.pem` files are accepted, skip this step.
+
+2. **Upload CA Certificate**:
+   - Navigate to your Function App (`ProxyMonitorFunctionApp`) > **Settings** > **Certificates**.
+   - Under **Certificates**, click **Upload certificate**.
+   - Select `ca-cert.pem` (or `ca-cert.cer` if converted) and click **Upload**. No password is required.
+   - Note the certificate’s **Thumbprint** (visible in the certificate list).
+
+3. **Upload Root CA Certificate**:
+   - Repeat for `rootca-cert.pem` (or `rootca-cert.cer`).
+   - Select the file, click **Upload**, and note the **Thumbprint**.
+
+4. **Configure Certificate Loading**:
+   - Go to **Settings** > **Configuration** > **Application settings**.
+   - Add:
+     - `WEBSITE_LOAD_CERTIFICATES`: The thumbprints of the CA and root CA certificates, comma-separated (e.g., `1234567890ABCDEF1234567890ABCDEF12345678,ABCDEF1234567890ABCDEF1234567890ABCDEF12`).
+     - `CaCertThumbprint`: The thumbprint of the CA certificate (e.g., `1234567890ABCDEF1234567890ABCDEF12345678`).
+     - `RootCaCertThumbprint`: The thumbprint of the root CA certificate (e.g., `ABCDEF1234567890ABCDEF1234567890ABCDEF12`).
+   - Save the settings.
+
+### Step 4: Create the PowerShell Function
 1. **Set Up Local Development Environment**:
    - Install Azure Functions Core Tools:
      ```bash
@@ -244,6 +291,8 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
    - Create `ProxyMonitor/run.ps1` with the following code:
      ```powershell
      using namespace System.Net
+     using namespace System.Net.Http
+     using namespace System.Security.Cryptography.X509Certificates
 
      param($Timer)
 
@@ -255,16 +304,20 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
          "https://sample.com",
          "https://demo.com"
      )
-     $dceEndpoint = "<Your-DCE-Logs-Ingestion-URI>"
-     $dcrImmutableId = "<Your-DCR-Immutable-ID>"
-     $tableName = "ProxyMonitorLogs_CL"
-     $managedIdentityClientId = "<Your-User-Assigned-Managed-Identity-Client-ID>"
-     $proxyUrl = "<your-proxy-url>" # e.g., "http://<proxy-host>:<port>"
+     $dceEndpoint = $env:DceEndpoint
+     $dcrImmutableId = $env:DcrImmutableId
+     $tableName = $env:TableName
+     $managedIdentityClientId = $env:ManagedIdentityClientId
+     $proxyUrl = $env:ProxyUrl # e.g., "https://<proxy-host>:<port>"
+     $caCertThumbprint = $env:CaCertThumbprint
+     $rootCaCertThumbprint = $env:RootCaCertThumbprint
 
-     # Get OAuth token using user-assigned managed identity
+     # Get OAuth token using user-assigned managed identity with IDENTITY_ENDPOINT and IDENTITY_HEADER
+     $identityEndpoint = $env:IDENTITY_ENDPOINT
+     $identityHeader = $env:IDENTITY_HEADER
      $resource = "https://monitor.azure.com"
-     $tokenUrl = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$resource&client_id=$managedIdentityClientId"
-     $headers = @{ "Metadata" = "true" }
+     $tokenUrl = "$identityEndpoint`?api-version=2019-08-01&resource=$resource&client_id=$managedIdentityClientId"
+     $headers = @{ "X-IDENTITY-HEADER" = $identityHeader }
      try {
          $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method Get -Headers $headers
          $accessToken = $tokenResponse.access_token
@@ -273,13 +326,54 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
          return
      }
 
+     # Load CA and root CA certificates from certificate store
+     try {
+         $certStore = New-Object X509Store -ArgumentList "My", "CurrentUser"
+         $certStore.Open("ReadOnly")
+         $caCert = $certStore.Certificates | Where-Object { $_.Thumbprint -eq $caCertThumbprint }
+         $rootCaCert = $certStore.Certificates | Where-Object { $_.Thumbprint -eq $rootCaCertThumbprint }
+         if (-not $caCert) {
+             Write-Error "CA certificate with thumbprint $caCertThumbprint not found in certificate store"
+             return
+         }
+         if (-not $rootCaCert) {
+             Write-Error "Root CA certificate with thumbprint $rootCaCertThumbprint not found in certificate store"
+             return
+         }
+     } catch {
+         Write-Error "Failed to load certificates: $_"
+         return
+     } finally {
+         $certStore.Close()
+     }
+
+     # Create custom certificate validation callback
+     $certChain = New-Object X509Chain
+     $certChain.ChainPolicy.ExtraStore.Add($caCert) | Out-Null
+     $certChain.ChainPolicy.ExtraStore.Add($rootCaCert) | Out-Null
+     $certChain.ChainPolicy.VerificationFlags = [X509VerificationFlags]::NoFlag
+     $certChain.ChainPolicy.RevocationMode = [X509RevocationMode]::NoCheck
+
+     $handler = New-Object HttpClientHandler
+     $handler.Proxy = New-Object System.Net.WebProxy -ArgumentList $proxyUrl
+     $handler.ServerCertificateCustomValidationCallback = {
+         param($request, $certificate, $chain, $sslPolicyErrors)
+         if ($sslPolicyErrors -eq [System.Net.Security.SslPolicyErrors]::None) {
+             return $true
+         }
+         $chainElement = New-Object X509ChainElement -ArgumentList $certificate
+         $status = $certChain.Build($chainElement.Certificate)
+         return $status
+     }
+     $httpClient = New-Object HttpClient -ArgumentList $handler
+
      # Prepare logs
      $logs = @()
      foreach ($url in $urls) {
          $executedAt = (Get-Date).ToUniversalTime().ToString("o")
          try {
              $startTime = Get-Date
-             $response = Invoke-WebRequest -Uri $url -Method Get -TimeoutSec 10 -Proxy $proxyUrl
+             $response = $httpClient.GetAsync($url).Result
              $responseTimeMs = [math]::Round(((Get-Date) - $startTime).TotalMilliseconds, 2)
              $proxyStatus = ($response.StatusCode -eq 200) ? "Up" : "Down"
              $logs += [PSCustomObject]@{
@@ -291,16 +385,20 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
                  ExecutedAt       = $executedAt
              }
          } catch {
+             $statusCode = if ($_.Exception.InnerException.Response) { [int]$_.Exception.InnerException.Response.StatusCode } else { 0 }
              $logs += [PSCustomObject]@{
                  Timestamp        = (Get-Date).ToUniversalTime().ToString("o")
                  Url              = $url
-                 HttpResponseCode = [int]$_.Exception.Response.StatusCode
+                 HttpResponseCode = $statusCode
                  ResponseTimeMs   = 0
                  ProxyStatus      = "Down"
                  ExecutedAt       = $executedAt
              }
          }
      }
+
+     # Dispose of HttpClient
+     $httpClient.Dispose()
 
      # Send logs to Log Analytics
      $headers = @{
@@ -315,20 +413,15 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
          Write-Error "Failed to send logs to Log Analytics: $_"
      }
      ```
-   - **Replace placeholders**:
-     - `<Your-DCE-Logs-Ingestion-URI>`: From the DCE properties (e.g., `https://<dce-name>.<region>.ingest.monitor.azure.com`).
-     - `<Your-DCR-Immutable-ID>`: From the DCR’s **JSON View** or PowerShell script output.
-     - `<Your-User-Assigned-Managed-Identity-Client-ID>`: The Client ID of the `ProxyMonitorIdentity` (e.g., `12345678-1234-1234-1234-1234567890ab`).
-     - `<your-proxy-url>`: The URL of the proxy to test (e.g., `http://<proxy-host>:<port>`).
 
-3. **Test Locally** (optional, limited by managed identity):
+3. **Test Locally** (optional, limited by managed identity and certificates):
    - Run the function locally to test HTTP requests and JSON payload:
      ```bash
      func start
      ```
-   - Note: Managed identity testing requires Azure; mock the token response or skip Log Analytics calls for local testing. You can test the proxy configuration locally by setting `$proxyUrl` to your proxy URL.
+   - Note: Managed identity testing (`IDENTITY_ENDPOINT` and `IDENTITY_HEADER`) and certificate loading require Azure, as they depend on the Function App’s certificate store and environment variables. Mock the token response and certificate validation for local testing, or focus on testing the proxy logic.
 
-### Step 4: Deploy to Azure App Service Environment
+### Step 5: Deploy to Azure App Service Environment
 1. **Create a Function App in ASE**:
    - In the Azure portal, go to **Create a resource** > **Function App**.
    - Select your subscription and resource group.
@@ -359,15 +452,10 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
      - `DcrImmutableId`: Your DCR immutable ID.
      - `TableName`: `ProxyMonitorLogs_CL`.
      - `ManagedIdentityClientId`: The Client ID of the `ProxyMonitorIdentity` (e.g., `12345678-1234-1234-1234-1234567890ab`).
-     - `ProxyUrl`: The URL of the proxy to test (e.g., `http://<proxy-host>:<port>`).
-   - Update `run.ps1` to use these settings:
-     ```powershell
-     $dceEndpoint = $env:DceEndpoint
-     $dcrImmutableId = $env:DcrImmutableId
-     $tableName = $env:TableName
-     $managedIdentityClientId = $env:ManagedIdentityClientId
-     $proxyUrl = $env:ProxyUrl
-     ```
+     - `ProxyUrl`: The URL of the proxy to test (e.g., `https://<proxy-host>:<port>`).
+     - `CaCertThumbprint`: The thumbprint of the CA certificate (e.g., `1234567890ABCDEF1234567890ABCDEF12345678`).
+     - `RootCaCertThumbprint`: The thumbprint of the root CA certificate (e.g., `ABCDEF1234567890ABCDEF1234567890ABCDEF12`).
+     - `WEBSITE_LOAD_CERTIFICATES`: The thumbprints of the CA and root CA certificates, comma-separated (e.g., `1234567890ABCDEF1234567890ABCDEF12345678,ABCDEF1234567890ABCDEF1234567890ABCDEF12`).
    - Save the settings.
 
 5. **Deploy the Function**:
@@ -377,7 +465,7 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
      ```
    - Verify deployment in the Azure portal under **Functions**.
 
-### Step 5: Enable Monitoring with Application Insights
+### Step 6: Enable Monitoring with Application Insights
 1. **Enable Application Insights**:
    - In the Function App, go to **Settings** > **Application Insights**.
    - Enable Application Insights and link to your Log Analytics workspace, or create a new Application Insights resource and note the **Connection String**.
@@ -386,10 +474,10 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
    - In the Function App, go to **Monitoring** > **Diagnostic settings** > **Add diagnostic setting**.
    - Select **FunctionAppLogs** and send to your Log Analytics workspace.
 
-### Step 6: Verify and Monitor
+### Step 7: Verify and Monitor
 1. **Check Function Execution**:
    - In the Azure portal, go to the Function App > **Functions** > **ProxyMonitor** > **Monitor**.
-   - Verify the function runs every 10 seconds and check for errors, especially in token acquisition or log ingestion.
+   - Verify the function runs every 10 seconds and check for errors, especially in certificate loading or HTTP requests.
 
 2. **Query Logs in Log Analytics**:
    - In the Log Analytics workspace, go to **Logs**.
@@ -410,7 +498,7 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
      ```
    - Set actions (e.g., email or webhook) and save.
 
-### Step 7: Optimize and Secure
+### Step 8: Optimize and Secure
 1. **Optimize Performance**:
    - Monitor Log Analytics ingestion costs, as logging every 10 seconds can accumulate data. Adjust frequency (e.g., every 30 seconds) or use sampling if needed.
    - Use the **Basic** table plan for cost savings if advanced analytics aren’t required.
@@ -418,22 +506,22 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
 2. **Secure the Function**:
    - The user-assigned managed identity eliminates stored credentials.
    - Restrict ASE network access using Virtual Network integration or private endpoints.
-   - If the proxy requires authentication, add credentials securely via application settings (contact your Azure administrator for guidance).
+   - Ensure the CA and root CA certificates are securely stored and not exposed.
 
 3. **Handle Failures**:
-   - The script includes error handling for token acquisition and log ingestion. Add retry logic for failed requests if needed.
+   - The script includes error handling for certificate loading, HTTP requests, and log ingestion. Add retry logic for failed requests if needed.
    - Monitor Application Insights for failures or timeouts.
 
 ## Notes
-- **Managed Identity**: The PowerShell function uses a **user-assigned managed identity** (`ProxyMonitorIdentity`) to authenticate with the Logs Ingestion API. The identity’s Client ID is specified in the application settings (`ManagedIdentityClientId`).
+- **Managed Identity**: The PowerShell function uses a **user-assigned managed identity** (`ProxyMonitorIdentity`) to authenticate with the Logs Ingestion API. The token is acquired using `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` environment variables.
 - **RBAC Permissions**: The **Monitoring Metrics Publisher** role on the DCR (`ProxyMonitorDCR`) is required for the user-assigned managed identity to send logs.
-- **Proxy Configuration**: The function routes requests through the proxy URL specified in the `ProxyUrl` setting. Ensure the proxy is accessible from the ASE and does not require authentication unless configured.
+- **Proxy Configuration**: The function routes requests through the proxy URL specified in the `ProxyUrl` setting. The CA and root CA certificates (`ca-cert.pem` and `rootca-cert.pem`) validate the proxy’s server certificate.
 - **Proxy Status**: Set to `Up` for HTTP 200 responses, `Down` otherwise. Adjust logic if other 2xx codes are valid.
 - **ExecutedAt**: Captures the start time of each request.
 - **Latency**: Log data may take 5–10 minutes to appear in Log Analytics.
 - **Costs**: Monitor ingestion costs in the Azure portal.
 - **ASE Considerations**: Ensure the ASE allows outbound internet access to the proxy URL, the five public URLs, and the DCE endpoint.
-- **References**: Based on Microsoft Learn documentation for Azure Functions, Log Analytics, and managed identities.
+- **References**: Based on Microsoft Learn documentation for Azure Functions, Log Analytics, managed identities, and certificate management.
 
 ## Troubleshooting
 - **Logs not appearing**:
@@ -441,14 +529,20 @@ This project deploys a PowerShell-based Azure Function in an Azure App Service E
   - Ensure the DCR uses the `Custom-ProxyMonitorLogs_CL` stream.
   - Check that the `ManagedIdentityClientId` matches the Client ID of `ProxyMonitorIdentity`.
 - **Token acquisition errors**:
-  - Check Application Insights logs for errors in the `Invoke-RestMethod` call to `http://169.254.169.254/metadata/identity/oauth2/token`.
+  - Check Application Insights logs for errors in the `Invoke-RestMethod` call to `$identityEndpoint`.
   - Ensure the user-assigned managed identity is assigned to the Function App and has the **Monitoring Metrics Publisher** role on the DCR.
   - Verify the `ManagedIdentityClientId` is correctly set in the application settings.
+  - Confirm that `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` are available in the Function App’s environment (**Settings** > **Configuration** > **Environment variables**).
+- **Certificate errors**:
+  - Check Application Insights logs for errors in certificate loading (e.g., "CA certificate with thumbprint not found").
+  - Ensure the `CaCertThumbprint` and `RootCaCertThumbprint` match the uploaded certificates’ thumbprints.
+  - Verify the `WEBSITE_LOAD_CERTIFICATES` setting includes both thumbprints.
+  - If `.pem` files fail to upload, convert to `.cer` format and retry.
+  - If HTTP requests fail with certificate validation errors, ensure the proxy’s server certificate is issued by the CA or root CA and that the certificates are correctly uploaded.
 - **Proxy errors**:
-  - Check Application Insights logs for errors in `Invoke-WebRequest` calls.
-  - Ensure the proxy URL is correct and accessible from the ASE.
-  - If the proxy requires authentication, add `-ProxyCredential` to `Invoke-WebRequest` and store credentials securely in application settings.
-- **Function errors**: Check Application Insights for token or ingestion issues.
+  - Check Application Insights logs for errors in `HttpClient` requests.
+  - Ensure the `ProxyUrl` is correct and accessible from the ASE.
+  - Verify the ASE’s network security groups (NSGs) or firewall allow outbound traffic to the proxy URL.
 - **Network issues**: Ensure the ASE allows outbound traffic to the proxy URL, public URLs, and DCE endpoint.
 - **DCR issues**: Verify the DCR’s **JSON View** in the Azure portal to confirm the `streamDeclarations` and `dataFlows` are correctly set.
 
