@@ -2,7 +2,7 @@
 
 This project deploys two PowerShell-based Azure Functions in an Azure Function App (`ProxyMonitorFunctionApp`) within an App Service Environment (ASE) to monitor a proxy:
 1. **ProxyMonitor**: Performs HTTP monitoring by accessing five public URLs every 10 seconds through a specified proxy URL, validating the proxy’s server certificate with CA and root CA certificates stored in the **LocalMachine** certificate store, and logging metrics to a Log Analytics table (`ProxyMonitorLogs_CL`).
-2. **TcpProxyMonitor**: Performs TCP monitoring on the proxy’s host and port every 10 seconds, logging metrics to a separate Log Analytics table (`TcpProxyMonitorLogs_CL`) without certificate validation.
+2. **TcpProxyMonitor**: Performs TCP monitoring on multiple proxy hosts and ports every 10 seconds, logging metrics to a separate Log Analytics table (`TcpProxyMonitorLogs_CL`) without certificate validation.
 
 Both functions use a user-assigned managed identity (`ProxyMonitorIdentity`) for authentication with the Logs Ingestion API and send logs to a Log Analytics workspace (`ProxyMonitorWorkspace`) using a shared Data Collection Endpoint (DCE).
 
@@ -13,7 +13,8 @@ Both functions use a user-assigned managed identity (`ProxyMonitorIdentity`) for
 - **Azure Functions Core Tools**: Version 4.x for local development.
 - **Log Analytics Workspace**: Created in Azure (e.g., `ProxyMonitorWorkspace`).
 - **URLs to Monitor (HTTP)**: Five public URLs (e.g., `https://example.com`).
-- **Proxy URL**: The URL of the proxy to test (e.g., `https://<proxy-host>:<port>` or `http://<proxy-host>:<port>`).
+- **Proxy Hosts and Ports (TCP)**: A JSON array of host/port pairs (e.g., `[{"host":"proxy1.example.com","port":443},{"host":"proxy2.example.com","port":8080}]`).
+- **Proxy URL (HTTP)**: The URL of the proxy for HTTP monitoring (e.g., `https://<proxy-host>:<port>`).
 - **Proxy Certificates (for HTTP function only)**:
   - CA certificate (`ca-cert.pem`): Intermediate CA certificate for the proxy’s server certificate.
   - Root CA certificate (`rootca-cert.pem`): Root CA certificate for the proxy’s server certificate.
@@ -28,7 +29,7 @@ The following resources are assumed to be already set up from the HTTP monitorin
 - **Data Collection Rule (DCR)**: `ProxyMonitorDCR` for HTTP monitoring, with Immutable ID (e.g., `dcr-abcdef1234567890`) and table `ProxyMonitorLogs_CL`.
 - **User-Assigned Managed Identity**: `ProxyMonitorIdentity` with Client ID (e.g., `12345678-1234-1234-1234-1234567890ab`), assigned to the Function App and granted **Monitoring Metrics Publisher** role on `ProxyMonitorDCR`.
 - **Certificates (for HTTP function)**: CA and root CA certificates uploaded to the **LocalMachine** certificate store, with thumbprints configured in `WEBSITE_LOAD_CERTIFICATES`, `CaCertThumbprint`, and `RootCaCertThumbprint` application settings.
-- **Application Settings**:
+- **Application Settings** (for HTTP function):
   - `DceEndpoint`: DCE logs ingestion URI.
   - `DcrImmutableId`: Immutable ID of `ProxyMonitorDCR`.
   - `TableName`: `ProxyMonitorLogs_CL`.
@@ -218,21 +219,23 @@ Create a new DCR (`TcpProxyMonitorDCR`) for the TCP monitoring function to log m
    - Verify the assignment in **Access Control (IAM)** > **View access** to ensure the managed identity has the **Monitoring Metrics Publisher** role on the new DCR.
 
 ### Step 2: Configure the Function App
-1. **Add Application Settings**:
+1. **Update Application Settings**:
    - In the Azure portal, navigate to your Function App (`ProxyMonitorFunctionApp`) > **Settings** > **Configuration** > **Application settings**.
-   - Add the following new settings:
+   - Add or update the following settings:
      - `TcpDcrImmutableId`: The immutable ID of the new DCR (`TcpProxyMonitorDCR`), e.g., `dcr-1234567890abcdef`.
      - `TcpTableName`: `TcpProxyMonitorLogs_CL`.
+     - `ProxyHostsPorts`: A JSON array of host/port pairs for TCP monitoring, e.g., `[{"host":"proxy1.example.com","port":443},{"host":"proxy2.example.com","port":8080}]`.
    - Verify existing settings (for the HTTP function):
-     - `DceEndpoint`: Your DCE logs ingestion URI (e.g., `https://<dce-name>.<region>.ingest.monitor.azure.com`).
+     - `DceEndpoint`: DCE logs ingestion URI (e.g., `https://<dce-name>.<region>.ingest.monitor.azure.com`).
      - `DcrImmutableId`: Immutable ID of `ProxyMonitorDCR` (e.g., `dcr-abcdef1234567890`).
      - `TableName`: `ProxyMonitorLogs_CL`.
      - `ManagedIdentityClientId`: Client ID of `ProxyMonitorIdentity` (e.g., `12345678-1234-1234-1234-1234567890ab`).
-     - `ProxyUrl`: Proxy URL (e.g., `https://<proxy-host>:<port>` or `http://<proxy-host>:<port>`).
+     - `ProxyUrl`: Proxy URL for HTTP monitoring (e.g., `https://<proxy-host>:<port>`).
      - `CaCertThumbprint`: Thumbprint of the CA certificate (for HTTP function).
      - `RootCaCertThumbprint`: Thumbprint of the root CA certificate (for HTTP function).
      - `WEBSITE_LOAD_CERTIFICATES`: Comma-separated thumbprints of CA and root CA certificates (for HTTP function).
    - Save the settings.
+   - **Note**: If you no longer need `ProxyUrl` for the TCP function, you can keep it for the HTTP function or remove it if the HTTP function is also updated to use `ProxyHostsPorts`.
 
 2. **Verify User-Assigned Managed Identity**:
    - Ensure `ProxyMonitorIdentity` is assigned to the Function App (**Settings** > **Identity** > **User assigned**).
@@ -277,22 +280,21 @@ Create a new DCR (`TcpProxyMonitorDCR`) for the TCP monitoring function to log m
      param($Timer)
 
      # Configuration
-     $proxyUrl = $env:ProxyUrl # e.g., "https://<proxy-host>:<port>" or "http://<proxy-host>:<port>"
+     $proxyHostsPortsJson = $env:ProxyHostsPorts # JSON array, e.g., [{"host":"proxy1.example.com","port":443},{"host":"proxy2.example.com","port":8080}]
      $dceEndpoint = $env:DceEndpoint
      $tcpDcrImmutableId = $env:TcpDcrImmutableId
      $tcpTableName = $env:TcpTableName
      $managedIdentityClientId = $env:ManagedIdentityClientId
 
-     # Extract host and port from ProxyUrl
+     # Parse ProxyHostsPorts JSON
      try {
-         $uri = [System.Uri]$proxyUrl
-         $host = $uri.Host
-         $port = $uri.Port
-         if (-not $port) {
-             $port = if ($uri.Scheme -eq "https") { 443 } else { 80 }
+         $proxyHostsPorts = ConvertFrom-Json $proxyHostsPortsJson
+         if (-not $proxyHostsPorts -or $proxyHostsPorts.Count -eq 0) {
+             Write-Error "ProxyHostsPorts is empty or invalid JSON"
+             return
          }
      } catch {
-         Write-Error "Failed to parse ProxyUrl ($proxyUrl): $_"
+         Write-Error "Failed to parse ProxyHostsPorts JSON: $_"
          return
      }
 
@@ -310,38 +312,47 @@ Create a new DCR (`TcpProxyMonitorDCR`) for the TCP monitoring function to log m
          return
      }
 
-     # Perform TCP connection test
+     # Prepare logs
      $logs = @()
      $executedAt = (Get-Date).ToUniversalTime().ToString("o")
-     try {
-         $startTime = Get-Date
-         $tcpClient = New-Object System.Net.Sockets.TcpClient
-         $connectionTask = $tcpClient.ConnectAsync($host, $port)
-         $timeout = 5000 # Timeout in milliseconds
-         if ($connectionTask.Wait($timeout)) {
-             $responseTimeMs = [math]::Round(((Get-Date) - $startTime).TotalMilliseconds, 2)
-             $tcpStatus = "Up"
-         } else {
+     foreach ($proxy in $proxyHostsPorts) {
+         $host = $proxy.host
+         $port = $proxy.port
+         if (-not $host -or -not $port) {
+             Write-Error "Invalid host or port for proxy: $($proxy | ConvertTo-Json)"
+             continue
+         }
+
+         try {
+             $startTime = Get-Date
+             $tcpClient = New-Object System.Net.Sockets.TcpClient
+             $connectionTask = $tcpClient.ConnectAsync($host, $port)
+             $timeout = 5000 # Timeout in milliseconds
+             if ($connectionTask.Wait($timeout)) {
+                 $responseTimeMs = [math]::Round(((Get-Date) - $startTime).TotalMilliseconds, 2)
+                 $tcpStatus = "Up"
+             } else {
+                 $responseTimeMs = 0
+                 $tcpStatus = "Down"
+                 Write-Error "TCP connection to $host`:$port timed out after $timeout ms"
+             }
+         } catch {
              $responseTimeMs = 0
              $tcpStatus = "Down"
-             Write-Error "TCP connection timed out after $timeout ms"
+             Write-Error "TCP connection to $host`:$port failed: $_"
+         } finally {
+             $tcpClient.Close()
+             $tcpClient.Dispose()
          }
-     } catch {
-         $responseTimeMs = 0
-         $tcpStatus = "Down"
-         Write-Error "TCP connection failed: $_"
-     } finally {
-         $tcpClient.Close()
-         $tcpClient.Dispose()
-     }
 
-     $logs += [PSCustomObject]@{
-         Timestamp      = (Get-Date).ToUniversalTime().ToString("o")
-         Host           = $host
-         Port           = $port
-         TcpStatus      = $tcpStatus
-         ResponseTimeMs = $responseTimeMs
-         ExecutedAt     = $executedAt
+         $logs += [PSCustomObject]@{
+             Timestamp      = (Get-Date).ToUniversalTime().ToString("o")
+             Host           = $host
+             Port           = [int]$port
+             TcpStatus      = $tcpStatus
+             ResponseTimeMs = $responseTimeMs
+             ExecutedAt     = $executedAt
+         }
      }
 
      # Send logs to Log Analytics
@@ -410,41 +421,42 @@ Create a new DCR (`TcpProxyMonitorDCR`) for the TCP monitoring function to log m
 
 ### Step 7: Optimize and Secure
 1. **Optimize Performance**:
-   - Monitor Log Analytics ingestion costs for both `ProxyMonitorLogs_CL` and `TcpProxyMonitorLogs_CL`. Adjust the timer schedule (e.g., every 30 seconds) or use sampling if costs are high.
+   - Monitor Log Analytics ingestion costs for both `ProxyMonitorLogs_CL` and `TcpProxyMonitorLogs_CL`, especially with multiple proxy hosts. Adjust the timer schedule (e.g., every 30 seconds by changing `function.json` to `*/30 * * * * *`) or use sampling if costs are high.
    - Use the **Basic** table plan for `TcpProxyMonitorLogs_CL` if advanced analytics aren’t needed.
 
 2. **Secure the Function**:
    - The user-assigned managed identity eliminates stored credentials.
-   - Ensure the ASE allows outbound traffic to the proxy’s host/port (for both HTTP and TCP functions) and the DCE endpoint (`https://<dce-name>.<region>.ingest.monitor.azure.com`).
+   - Ensure the ASE allows outbound traffic to all proxy hosts/ports (for TCP), public URLs (for HTTP), and the DCE endpoint (`https://<dce-name>.<region>.ingest.monitor.azure.com`).
    - Restrict ASE network access using Virtual Network integration or private endpoints if needed.
 
 3. **Handle Failures**:
-   - The TCP function includes error handling for TCP connections and log ingestion. Add retry logic for failed connections if needed.
+   - The TCP function includes error handling for TCP connections, JSON parsing, and log ingestion. Add retry logic for failed connections if needed.
    - Monitor Application Insights for failures or timeouts.
 
 ## Notes
 - **Managed Identity**: Both functions use the same **user-assigned managed identity** (`ProxyMonitorIdentity`) for authentication with the Logs Ingestion API, leveraging `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`.
 - **RBAC Permissions**: The `ProxyMonitorIdentity` must have the **Monitoring Metrics Publisher** role on both `ProxyMonitorDCR` (HTTP) and `TcpProxyMonitorDCR` (TCP).
 - **Proxy Configuration**:
-  - **HTTP Function**: Uses `System.Net.Http.HttpClient` to test HTTP connectivity through the proxy, validating the server certificate with CA and root CA certificates from the **LocalMachine** store.
-  - **TCP Function**: Uses `System.Net.Sockets.TcpClient` to test TCP connectivity to the proxy’s host and port without certificate validation.
+  - **HTTP Function**: Uses `System.Net.Http.HttpClient` to test HTTP connectivity through the proxy specified in `ProxyUrl`, validating the server certificate with CA and root CA certificates from the **LocalMachine** store.
+  - **TCP Function**: Uses `System.Net.Sockets.TcpClient` to test TCP connectivity to multiple proxy hosts/ports specified in `ProxyHostsPorts`, without certificate validation.
 - **Proxy Status**:
   - HTTP: `ProxyStatus` is `Up` for HTTP 200 responses, `Down` otherwise.
   - TCP: `TcpStatus` is `Up` for successful connections, `Down` otherwise.
 - **ExecutedAt**: Captures the start time of each request for both functions.
 - **Latency**: Log data may take 5–10 minutes to appear in Log Analytics.
-- **Costs**: Monitor ingestion costs for both tables in the Azure portal.
-- **ASE Considerations**: Ensure the ASE allows outbound traffic to the proxy’s host/port, public URLs (for HTTP), and DCE endpoint. Check network security groups (NSGs) or firewall settings.
+- **Costs**: Monitor ingestion costs for both tables, especially with multiple proxy hosts, in the Azure portal.
+- **ASE Considerations**: Ensure the ASE allows outbound traffic to all proxy hosts/ports, public URLs (for HTTP), and the DCE endpoint. Check network security groups (NSGs) or firewall settings.
 - **Certificates**: The TCP function does not use certificates. The HTTP function uses CA and root CA certificates in the **LocalMachine** store for server certificate validation.
 - **References**: Based on Microsoft Learn documentation for Azure Functions, Azure Monitor, managed identities, and TCP connectivity.
 
 ## Troubleshooting
 - **TCP Logs Not Appearing**:
   - Verify the DCE, DCR (`TcpProxyMonitorDCR`), and table (`TcpProxyMonitorLogs_CL`) configuration in the Azure portal’s **JSON View**.
-  - Ensure `TcpDcrImmutableId` and `TcpTableName` are correctly set in the Function App’s application settings.
+  - Ensure `TcpDcrImmutableId`, `TcpTableName`, and `ProxyHostsPorts` are correctly set in the Function App’s application settings.
   - Check that `ProxyMonitorIdentity` has the **Monitoring Metrics Publisher** role on `TcpProxyMonitorDCR`.
+  - Validate the `ProxyHostsPorts` JSON format (e.g., `[{"host":"proxy1.example.com","port":443},{"host":"proxy2.example.com","port":8080}]`).
 - **HTTP Logs Not Appearing** (to ensure existing function is unaffected):
-  - Verify `DcrImmutableId` and `TableName` settings.
+  - Verify `DcrImmutableId`, `TableName`, and `ProxyUrl` settings.
   - Check `ProxyMonitorIdentity` permissions on `ProxyMonitorDCR`.
 - **Token Acquisition Errors**:
   - Check Application Insights logs for errors in the `Invoke-RestMethod` call to `$identityEndpoint`.
@@ -452,14 +464,14 @@ Create a new DCR (`TcpProxyMonitorDCR`) for the TCP monitoring function to log m
   - Confirm that `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` are available (**Settings** > **Configuration** > **Environment variables**).
 - **TCP Connection Errors**:
   - Check Application Insights logs for errors like “TCP connection failed” or “TCP connection timed out.”
-  - Verify the `ProxyUrl` is correct (e.g., `https://<proxy-host>:<port>` or `http://<proxy-host>:<port>`).
-  - Ensure the ASE’s NSGs or firewall allow outbound traffic to the proxy’s host and port.
+  - Verify each host/port in `ProxyHostsPorts` is correct and accessible.
+  - Ensure the ASE’s NSGs or firewall allow outbound traffic to all proxy hosts/ports.
 - **HTTP Connection Errors** (to ensure existing function is unaffected):
   - Check logs for certificate-related errors (e.g., “CA certificate with thumbprint not found in LocalMachine certificate store”).
   - Verify `CaCertThumbprint`, `RootCaCertThumbprint`, and `WEBSITE_LOAD_CERTIFICATES` settings.
   - Ensure the proxy’s server certificate is valid and issued by the uploaded CA or root CA.
 - **Network Issues**:
-  - Ensure the ASE allows outbound traffic to the proxy’s host/port, public URLs (for HTTP), and DCE endpoint.
+  - Ensure the ASE allows outbound traffic to all proxy hosts/ports, public URLs (for HTTP), and DCE endpoint.
   - If the ASE is isolated, configure Virtual Network integration or private endpoints.
 
 For further assistance, refer to the [Azure Functions documentation](https://learn.microsoft.com/azure/azure-functions/) or contact your Azure administrator.
