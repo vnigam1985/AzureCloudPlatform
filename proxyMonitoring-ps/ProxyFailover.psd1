@@ -7,10 +7,10 @@ param($Request)
 
 # Resource group and DNS zone info
 $resourceGroupName = "MyResourceGroup"
-$dnsZoneName = "netskope.services.hcloud.bmogc.net"
+$dnsZoneName = "internal.contoso.net
 $recordSetName = "proxy"
-$originalIP = "163.116.128.80"
-$fallbackIP = "163.116.128.81"
+$originalIP = "10.0.0.9"
+$fallbackIP = "10.0.0.8"
 
 # Authenticate using Managed Identity
 Connect-AzAccount -Identity
